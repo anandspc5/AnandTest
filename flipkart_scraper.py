@@ -13,40 +13,88 @@ class FlipkartScraper:
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Connection': 'keep-alive',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
         }
         self.base_url = "https://www.flipkart.com/search"
+        self.max_retries = 3
+        self.retry_delay = 5
 
     def search_products(self, query):
-        try:
-            params = {
-                'q': query,
-                'otracker': 'search',
-                'marketplace': 'FLIPKART'
-            }
-            
-            time.sleep(random.uniform(1, 3))
-            
-            response = requests.get(self.base_url, params=params, headers=self.headers)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            products = []
-            product_cards = soup.find_all('div', {'class': ['_1AtVbE', '_2kHMtA', '_4ddWXP']})
-            
-            for card in product_cards:
-                product = self._extract_product_info(card)
-                if product:
-                    products.append(product)
-            
-            return products
-            
-        except requests.RequestException as e:
-            print(f"Error fetching products: {str(e)}")
-            return []
-        except Exception as e:
-            print(f"An unexpected error occurred: {str(e)}")
-            return []
+        retries = 0
+        while retries < self.max_retries:
+            try:
+                params = {
+                    'q': query,
+                    'otracker': 'search',
+                    'marketplace': 'FLIPKART'
+                }
+                
+                # Random delay between requests (2-5 seconds)
+                delay = random.uniform(2, 5)
+                print(f"Waiting {delay:.1f} seconds before making request...")
+                time.sleep(delay)
+                
+                print(f"Attempt {retries + 1} of {self.max_retries}...")
+                response = requests.get(
+                    self.base_url, 
+                    params=params, 
+                    headers=self.headers,
+                    timeout=15
+                )
+                
+                # Handle 529 error specifically
+                if response.status_code == 529:
+                    wait_time = self.retry_delay * (2 ** retries)  # Exponential backoff
+                    print(f"Server is busy (529 error). Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+                    retries += 1
+                    continue
+                
+                response.raise_for_status()
+                
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # First try to find products
+                products = []
+                product_cards = soup.find_all('div', {'class': ['_1AtVbE', '_2kHMtA', '_4ddWXP']})
+                
+                if not product_cards:
+                    # If no products found, check if we're being rate limited
+                    if soup.find('div', string=lambda text: text and 'rate limited' in text.lower()):
+                        print("Rate limiting detected. Waiting before retry...")
+                        time.sleep(self.retry_delay * (2 ** retries))
+                        retries += 1
+                        continue
+                
+                for card in product_cards:
+                    product = self._extract_product_info(card)
+                    if product:
+                        products.append(product)
+                
+                if products:
+                    return products
+                else:
+                    print("No products found in the response. Retrying...")
+                    retries += 1
+                    time.sleep(self.retry_delay)
+                
+            except requests.exceptions.RequestException as e:
+                print(f"Request error: {str(e)}")
+                if retries < self.max_retries - 1:
+                    wait_time = self.retry_delay * (2 ** retries)
+                    print(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    retries += 1
+                else:
+                    print("Max retries reached. Please try again later.")
+                    return []
+            except Exception as e:
+                print(f"An unexpected error occurred: {str(e)}")
+                return []
+        
+        print("Max retries reached with no successful results.")
+        return []
 
     def _extract_product_info(self, card):
         try:
